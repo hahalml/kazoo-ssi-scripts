@@ -1,0 +1,189 @@
+mkdir -p /var/lib/xen/images/debian/squeeze
+cd /var/lib/xen/images/debian/squeeze
+wget http://mirror.switch.ch/ftp/mirror/debian/dists/squeeze/main/installer-amd64/current/images/netboot/xen/initrd.gz
+wget http://mirror.switch.ch/ftp/mirror/debian/dists/squeeze/main/installer-amd64/current/images/netboot/xen/vmlinuz
+
+lvcreate -L 20G -n kz02 VG0
+
+xm create /etc/xen/manual/kz02-install.cfg -c
+
+
+
+lvcreate -L 20G -n kz02_debian_pristine VG0
+dd bs=16M if=/dev/VG0/kz02 of=/dev/VG0/kz02_debian_pristine 
+
+ln -s /etc/xen/manual/kz02.cfg /etc/xen/auto/
+
+https://2600hz.atlassian.net/wiki/display/docs/Manually+installing+on+Ubuntu
+
+
+apt-get install -y dnsutils less locate
+
+
+echo "deb http://backports.debian.org/debian-backports squeeze-backports main" >/etc/apt/sources.list.d/squeeze-backports.list
+
+apt-get install -y lsb-release
+echo "deb http://packages.cloudant.com/debian `lsb_release -cs` main" | tee /etc/apt/sources.list.d/cloudant.list 
+
+
+echo "deb http://www.rabbitmq.com/debian/ testing main" >/etc/apt/sources.list.d/rabbitmq.list
+
+wget -O /tmp/rabbitmq-signing-key-public.asc http://www.rabbitmq.com/rabbitmq-signing-key-public.asc
+apt-key add /tmp/rabbitmq-signing-key-public.asc
+
+apt-get update 
+
+apt-get -t squeeze-backports install -y bigcouch rabbitmq-server
+
+
+# set a secure password for rabbitmq
+apt-get install pwgen
+mkdir /etc/kazoo
+pwgen -1 15 >/etc/kazoo/.rabbitmq.guest.password
+
+rabbitmqctl change_password guest `cat /etc/kazoo/.rabbitmq.guest.password`
+
+
+# for debugging -- after this, http://kz02.txlab.net:55672/ provides a management interface
+rabbitmq-plugins enable rabbitmq_management
+service rabbitmq-server restart
+
+
+
+
+
+# configure bigcouch
+
+pwgen -1 15 >/etc/kazoo/.bigcouch.admin.password
+
+sed -i 's/^-name.*/-name 'bigcouch@`hostname -f`'/' /opt/bigcouch/etc/vm.args
+
+echo "[admins]" >>/opt/bigcouch/etc/local.ini
+echo "admin = `cat /etc/kazoo/.bigcouch.admin.password`" >>/opt/bigcouch/etc/local.ini
+
+sv restart bigcouch
+# in /opt/bigcouch/etc/local.ini  the admin password should now be hashed
+
+# Management interface: http://kz02.txlab.net:5984/_utils/
+
+# TODO: improve Bigcouch security
+# http://blog.mattwoodward.com/2012/03/definitive-guide-to-couchdb.html
+
+
+
+### Cookie that should be the same in FreeSWITCH, Kazoo, and Kazoo UI (?)
+pwgen -1 15 >/etc/kazoo/.kazoo.erlang.cookie
+
+
+####  Installing FreeSWITCH
+
+apt-get install -y git-core gcc g++ ncurses-base ncurses-bin autoconf libjpeg-dev libtool sox libcurl4-openssl-dev libvorbis-dev libogg-dev
+
+apt-get install -y gawk libncurses5-dev make python-dev gawk pkg-config libtiff-dev libperl-dev libgdbm-dev libdb-dev
+
+
+# do it before installing freeswitch, then installer will skip the vanilla config
+git clone git://github.com/ssinyagin/whistle-fs.git /opt/freeswitch/conf
+
+
+git clone git://git.freeswitch.org/freeswitch.git /usr/src/freeswitch
+cd /usr/src/freeswitch
+./bootstrap.sh
+
+sed -i \
+ -e 's|#formats/mod_shout|formats/mod_shout|g' \
+ -e's|#event_handlers/mod_erlang_event|event_handlers/mod_erlang_event|g' \
+ modules.conf
+
+./configure  --prefix=/opt/freeswitch && make all install sounds-install moh-install mod_erlang_event-install mod_shell_stream-install
+
+useradd -r -d /opt/freeswitch freeswitch
+chown -R freeswitch:freeswitch /opt/freeswitch
+
+cp debian/freeswitch-sysvinit.freeswitch.init  /etc/init.d/freeswitch
+sed -i \
+ -e 's|^DAEMON=.*|DAEMON=/opt/freeswitch/bin/freeswitch|' \
+ -e 's|^WORKDIR=.*|WORKDIR=/opt/freeswitch|' \
+ -e 's| *-nonat||' \
+ /etc/init.d/freeswitch
+chmod 755 /etc/init.d/freeswitch
+
+insserv /etc/init.d/freeswitch
+update-rc.d freeswitch enable
+
+
+
+sed -i -e 's/%HOSTNAME%/'`hostname -f`'/g' /opt/freeswitch/conf/autoload_configs/erlang_event.conf.xml
+
+cp /etc/kazoo/.kazoo.erlang.cookie /opt/freeswitch/conf/autoload_configs/.erlang.cookie 
+chown freeswitch:freeswitch  /opt/freeswitch/conf/autoload_configs/.erlang.cookie
+chmod 600 /opt/freeswitch/conf/autoload_configs/.erlang.cookie
+
+mkdir /var/log/freeswitch
+chown freeswitch:freeswitch /var/log/freeswitch
+
+
+# TODO: populate autoload_configs/acl.conf.xml
+
+service freeswitch start
+
+
+
+##### Installing Kazoo
+
+apt-get -t squeeze-backports install -y erlang-src
+apt-get install -y xsltproc zip
+
+
+git clone git://github.com/2600hz/kazoo.git /opt/kazoo
+
+sed -i \
+ -e 's|amqp://guest:guest|amqp://guest:'`cat /etc/kazoo/.rabbitmq.guest.password`'|' \
+ /opt/kazoo/lib/whistle_amqp-1.0.0/priv/startup.config 
+
+
+sed -i \
+ -e 's|^{default_couch_host.*|{couch_host, {"127.0.0.1",5984,"admin","'`cat /etc/kazoo/.bigcouch.admin.password`'",5986}}.|' \
+ /opt/kazoo/lib/whistle_couch-1.0.0/priv/startup.config
+
+
+sed -i \
+ -e 's|^-setcookie.*|-setcookie '`cat /etc/kazoo/.kazoo.erlang.cookie`'|' \
+ /opt/kazoo/ecallmgr/conf/vm.args
+
+
+sed -i \
+ -e 's|^-setcookie.*|-setcookie '`cat /etc/kazoo/.kazoo.erlang.cookie`'|' \
+ /opt/kazoo/whistle_apps/conf/vm.args
+
+
+cd /opt/kazoo
+ERL_LIBS=/opt/kazoo/lib make
+
+cd /opt/kazoo/whistle_apps
+./start-dev.sh
+./start.sh
+
+
+cd /opt/kazoo/ecallmgr
+./start-dev.sh
+./start.sh
+
+
+# Initialize DB
+https://2600hz.atlassian.net/wiki/display/docs/Manually+Editing+Database+Documents
+
+/opt/kazoo/utils/sup/sup crossbar_maintenance create_account admin sip.kz02.txlab.net admin wrejcfds
+
+
+
+/opt/kazoo/utils/sup/sup whapps_config flush
+/opt/kazoo/utils/sup/sup whapps_controller restart_app crossbar
+/opt/kazoo/utils/sup/sup stepswitch_maintenance reload_resources
+
+
+
+https://2600hz.atlassian.net/wiki/display/docs/How+to+use+the+SUP+command
+
+
+/opt/kazoo/utils/sup/sup -n ecallmgr ecallmgr_maintenance add_fs_node freeswitch@kz02.txlab.net
