@@ -187,3 +187,27 @@ https://2600hz.atlassian.net/wiki/display/docs/How+to+use+the+SUP+command
 
 
 /opt/kazoo/utils/sup/sup -n ecallmgr ecallmgr_maintenance add_fs_node freeswitch@kz02.txlab.net
+
+/opt/kazoo/utils/sup/sup -n ecallmgr ecallmgr_config get fs_nodes
+/opt/kazoo/utils/sup/sup -n ecallmgr ecallmgr_maintenance list_fs_nodes
+
+
+
+
+## WINKSTART, the GUI
+
+cd /opt
+git clone git://github.com/2600hz/kazoo_ui.git
+cd kazoo_ui/
+
+apt-get install apache2
+
+vi /etc/apache2/sites-available/kazoo
+a2dissite default
+a2ensite kazoo
+/etc/init.d/apache2 restart
+
+
+cd /opt/kazoo_ui
+sed -i -e 's/api.2600hz.com/kz02.txlab.net/' config/config.js
+
